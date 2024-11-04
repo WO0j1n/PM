@@ -1,3 +1,9 @@
 streamlit
-PyPDF2
+openai
+python-dotenv
 weaviate-client
+os
+PyPDF2
+re
+logging
+dotenv
