@@ -18,7 +18,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Weaviate 클라이언트 설정
-WEAVIATE_URL = "https://fxlbjq0eq7m60mbelxgpng.c0.asia-southeast1.gcp.weaviate.network"
+WEAVIATE_URL = "https://fxlbgj0eq7m60mbelxgpng.c0.asia-southeast1.gcp.weaviate.cloud"
 client = weaviate.Client(WEAVIATE_URL)
 
 # Weaviate에 데이터 스키마 생성
