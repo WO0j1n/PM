@@ -438,29 +438,6 @@ def main():
         else:
             st.warning(f"{category_option} 카테고리에 해당하는 문서가 없습니다.")
 
-
-    # 2. DB 시각화
-    st.header("2️⃣ DB 시각화")
-
-    if not check_weaviate_data():
-        st.error("Weaviate에 문서가 없습니다. 데이터를 다시 확인하거나 업로드하세요.")
-        return
-    else:
-        st.success("Weaviate에 문서가 성공적으로 확인되었습니다.")
-
-    category_option = st.selectbox("🔍 카테고리를 선택하세요", ["적금", "예금", "채권", "청년"])
-
-    if st.button("📊 시각화 보기"):
-        documents = get_documents_by_category(category_option)
-        if documents:
-            st.write(f"**{category_option}** 카테고리의 문서들:")
-            for doc in documents:
-                st.write(f"**파일명**: {doc['filename']}")
-                st.write(f"**키워드**: {', '.join(doc['keywords']) if doc['keywords'] else '없음'}")
-                st.write("---")
-        else:
-            st.warning(f"{category_option} 카테고리에 해당하는 문서가 없습니다.")
-
     import re
 
     import re
