@@ -7,19 +7,22 @@ import weaviate
 import openai
 from dotenv import load_dotenv
 
-# 1. .env 파일에서 환경 변수를 로드합니다.
+# .env 파일에서 환경 변수 로드
 load_dotenv()
 
-# 2. 환경 변수에서 OpenAI API 키를 가져옵니다.
-openai.api_key = os.getenv("OPENAI_API_KEY")
+# 환경 변수에서 Weaviate URL 및 API 키 가져오기
+WEAVIATE_URL = "https://your-weaviate-instance-url"  # REST Endpoint URL
+WEAVIATE_API_KEY = os.getenv("WEAVIATE_API_KEY")  # .env 파일에 저장된 API 키
+
+# Weaviate 클라이언트 생성 (API 키 인증 사용)
+client = weaviate.Client(
+    url=WEAVIATE_URL,
+    auth_client_secret=weaviate.AuthApiKey(api_key=WEAVIATE_API_KEY)
+)
 
 # 로깅 설정
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# Weaviate 클라이언트 설정
-WEAVIATE_URL = "https://fxlbgj0eq7m60mbelxgpng.c0.asia-southeast1.gcp.weaviate.cloud"
-client = weaviate.Client(WEAVIATE_URL)
 
 # Weaviate에 데이터 스키마 생성
 def create_weaviate_schema():
