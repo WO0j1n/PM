@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # 환경 변수에서 Weaviate URL 및 API 키 가져오기
-WEAVIATE_URL = "https://your-weaviate-instance-url"  # REST Endpoint URL
+WEAVIATE_URL = "https://fxlbgj0eq7m60mbelxgpng.c0.asia-southeast1.gcp.weaviate.cloud"  # REST Endpoint URL
 WEAVIATE_API_KEY = os.getenv("WEAVIATE_API_KEY")  # .env 파일에 저장된 API 키
 
 # Weaviate 클라이언트 생성 (API 키 인증 사용)
