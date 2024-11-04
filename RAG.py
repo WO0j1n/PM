@@ -398,7 +398,34 @@ def main():
 
     # 1. PDF 파일 추출 및 Weaviate에 저장
     st.header("1️⃣ PDF 내용 추출 및 DB 저장")
-    pdf_folder = st.text_input("📁 PDF 파일이 저장된 폴더 경로를 입력하세요", "/Users/im-woojin/Desktop/신한은행/신한은행_데이터")
+
+    # 파일 업로드 위젯 추가
+    uploaded_file = st.file_uploader("📁 PDF 파일을 업로드하세요", type=["pdf"])
+
+    if uploaded_file is not None:
+        # PDF 파일을 처리하는 로직
+        try:
+            # PDF 파일 내용을 추출하고 Weaviate에 저장
+            reader = PdfReader(uploaded_file)
+            text = ''
+            for page_num, page in enumerate(reader.pages, start=1):
+                extracted_text = page.extract_text()
+                if extracted_text:
+                    text += extracted_text
+                else:
+                    logger.warning(f"페이지 {page_num}에서 텍스트를 추출할 수 없습니다: {uploaded_file.name}")
+
+            # 전처리 및 분류
+            processed_text = preprocess_text(text)
+            category = classify_product(processed_text)
+            save_to_weaviate(uploaded_file.name, text, processed_text, category)
+
+            st.success(f"{uploaded_file.name} 파일이 성공적으로 Weaviate에 저장되었습니다!")
+        except Exception as e:
+            st.error(f"파일을 처리하는 중 오류가 발생했습니다: {e}")
+    
+    # 기존 폴더 경로 입력 부분 유지 (옵션으로 추가)
+    pdf_folder = st.text_input("📁 PDF 파일이 저장된 폴더 경로를 입력하세요 (선택 사항)")
 
     if st.button("🔍 PDF 내용 추출 및 DB 저장"):
         if not os.path.exists(pdf_folder):
@@ -419,6 +446,7 @@ def main():
                 save_to_weaviate(filename, content, proc_content, category)
 
         st.success("🚀 모든 문서가 Weaviate에 성공적으로 저장되었습니다!")
+
 
     # 2. DB 시각화
     st.header("2️⃣ DB 시각화")
