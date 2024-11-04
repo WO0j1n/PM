@@ -5,9 +5,13 @@ import streamlit as st
 import logging
 import weaviate
 import openai
+from dotenv import load_dotenv
 
-# OpenAI API 키 설정
-openai.api_key = "sk-proj-LI_a6JVMxIV6V6CpM1zJANsaWXTRL6-0-0ayE-XFsZJOTQ6kk42w-0-kmUzvscutierbM6NgbT3BlbkFJ3E3W7GxjKJn7WMf5z-3jsOQ9rPKOz0-1Wf06yhSNZgkeB4r98l8WphifBo7jucy3D9h5e6Gz4A"  # 올바른 하이픈(-) 사용
+# 1. .env 파일에서 환경 변수를 로드합니다.
+load_dotenv()
+
+# 2. 환경 변수에서 OpenAI API 키를 가져옵니다.
+openai.api_key = os.getenv("OPENAI_API_KEY")
 
 # 로깅 설정
 logging.basicConfig(level=logging.INFO)
@@ -312,6 +316,79 @@ def classify_product_with_mbti(income_level, wants_loan, age, mbti):
         logger.error(f"MBTI 기반 상품 추천 중 오류 발생: {e}")
         return "미지정"
 
+def fetch_all_documents():
+    try:
+        response = client.query.get("Document", ["filename", "content", "processed_content", "category", "income_level"]).do()
+        documents = response.get("data", {}).get("Get", {}).get("Document", [])
+        return documents
+    except Exception as e:
+        logger.error(f"Weaviate에서 데이터를 가져오는 중 오류: {e}")
+        return []
+
+def perform_rag_based_analysis_and_mapping(user_query, mbti=None):
+    try:
+        # Weaviate에서 문서 가져오기
+        documents = perform_rag_query(user_query)
+        if not documents:
+            return "관련 문서를 찾을 수 없습니다."
+
+        # 문서 내용을 LLM에게 전달하여 분석하도록 프롬프트 구성
+        context = "\n\n".join([doc['content'] for doc in documents])
+        analysis_prompt = f"""
+        너는 금융 및 데이터 분석 전문가 AI입니다. 다음은 관련된 문서들입니다:
+
+        {context}
+
+        1. 각 문서에서 주요 키워드를 추출해줘.
+        2. 문서를 서로 유사성에 따라 클러스터링해줘.
+        3. 주어진 MBTI 유형({mbti})에 따라 적절한 금융 상품을 매핑해줘.
+        """
+
+        # LLM에 프롬프트 전달
+        completion = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",  # 또는 "gpt-4"
+            messages=[
+                {"role": "user", "content": analysis_prompt}
+            ],
+            max_tokens=1000,
+            temperature=0.7
+        )
+        answer = completion.choices[0].message['content'].strip()
+        return answer
+    except Exception as e:
+        logger.error(f"RAG 기반 분석 중 오류 발생: {e}")
+        return "RAG 기반 분석을 수행하는 중 오류가 발생했습니다."
+
+
+def check_weaviate_data():
+    try:
+        response = client.query.get("Document", ["filename"]).do()
+        documents = response.get("data", {}).get("Get", {}).get("Document", [])
+        if not documents:
+            logger.error("Weaviate에 문서가 없습니다.")
+            return False
+        else:
+            logger.info(f"Weaviate에 {len(documents)}개의 문서가 있습니다.")
+            return True
+    except Exception as e:
+        logger.error(f"Weaviate 데이터 점검 중 오류: {e}")
+        return False
+
+def perform_rag_query(query):
+    try:
+        # Weaviate에서 쿼리를 수행해 관련 문서 검색
+        response = client.query.get("Document", ["filename", "content", "category"]).with_near_text({
+            "concepts": [query],
+            "certainty": 0.7  # 확실성 값을 조정해 더 정확한 결과 반환
+        }).with_limit(5).do()
+
+        documents = response.get("data", {}).get("Get", {}).get("Document", [])
+        if not documents:
+            logger.warning("관련 문서를 찾을 수 없습니다.")
+        return documents
+    except Exception as e:
+        logger.error(f"RAG 쿼리 중 오류 발생: {e}")
+        return []
 
 def main():
     st.title("📄 PDF 내용 추출 및 LLM 기반 대화 시스템")
@@ -342,6 +419,13 @@ def main():
 
     # 2. DB 시각화
     st.header("2️⃣ DB 시각화")
+
+    if not check_weaviate_data():
+        st.error("Weaviate에 문서가 없습니다. 데이터를 다시 확인하거나 업로드하세요.")
+        return
+    else:
+        st.success("Weaviate에 문서가 성공적으로 확인되었습니다.")
+
     category_option = st.selectbox("🔍 카테고리를 선택하세요", ["적금", "예금", "채권", "청년"])
 
     if st.button("📊 시각화 보기"):
@@ -360,7 +444,7 @@ def main():
     import re
 
     # 3. LLM 기반 대화 시스템
-    st.header("3️⃣ LLM 기반 대화 시스템")
+    st.header("3️⃣ RAG 기반 대화 시스템")
     user_query = st.text_input("💬 질문을 입력하세요")
 
     if st.button("💡 답변 생성"):
@@ -370,13 +454,28 @@ def main():
                 safe_query = user_query.encode('utf-8', 'ignore').decode('utf-8')
                 safe_query = re.sub(r'[^\w\s가-힣]', '', safe_query)  # 한글, 영문, 숫자, 공백만 허용
 
-                prompt = f"질문: {safe_query}\n\n답변:"
+                # Weaviate에서 관련 문서 검색
+                documents = perform_rag_query(safe_query)
+                if not documents:
+                    st.warning("관련 문서를 찾을 수 없습니다. GPT만의 답변을 생성합니다.")
+                    context = ""
+                else:
+                    # 관련 문서의 콘텐츠를 컨텍스트로 결합
+                    context = "\n\n".join([doc['content'] for doc in documents])
+                    st.write("🔍 **RAG에 사용된 문서:**")
+                    for doc in documents:
+                        st.write(f"- **파일명**: {doc['filename']}")
+                        st.write(f"  **카테고리**: {doc['category']}")
+
+                # GPT에 제공할 프롬프트 생성
+                prompt = f"문맥: {context}\n\n질문: {safe_query}\n\n답변:"
 
                 # GPT 응답 생성
                 completion = openai.ChatCompletion.create(
                     model="gpt-3.5-turbo",  # 또는 "gpt-4"
                     messages=[
-                        {"role": "user", "content": safe_query}
+                        {"role": "system", "content": "너는 문서를 기반으로 대화하는 금융 전문가 AI입니다."},
+                        {"role": "user", "content": prompt}
                     ],
                     max_tokens=300,
                     temperature=0.7
