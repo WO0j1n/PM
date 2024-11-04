@@ -396,29 +396,48 @@ def perform_rag_query(query):
 def main():
     st.title("📄 PDF 내용 추출 및 LLM 기반 대화 시스템")
 
-    # 1. PDF 파일 추출 및 Weaviate에 저장
-    st.header("1️⃣ PDF 내용 추출 및 DB 저장")
-    pdf_directory = st.text_input("📁 PDF 파일이 포함된 디렉토리 경로를 입력하세요")
+    # 1. PDF 파일 업로드 및 Weaviate에 저장
+    st.header("1️⃣ PDF 파일 업로드 및 DB 저장")
+    uploaded_file = st.file_uploader("📁 PDF 파일을 업로드하세요", type=["pdf"])
 
-    if st.button("🔍 PDF 내용 추출 및 DB 저장"):
-        if not os.path.exists(pdf_directory):
-            st.error("입력한 디렉토리 경로가 존재하지 않습니다. 다시 확인해주세요.")
-            return
-
+    if uploaded_file is not None:
         create_weaviate_schema()
 
         with st.spinner("📄 PDF 파일에서 텍스트를 추출 중입니다..."):
-            filenames, documents = extract_text_from_pdfs_in_directory(pdf_directory)
-            if not filenames:
-                st.warning("해당 디렉토리에 PDF 파일이 없거나 텍스트를 추출할 수 없습니다.")
+            content = extract_text_from_pdf(uploaded_file)
+            if not content:
+                st.warning("PDF 파일에서 텍스트를 추출할 수 없습니다.")
                 return
-            processed_documents = [preprocess_text(doc) for doc in documents]
 
-            for filename, content, proc_content in zip(filenames, documents, processed_documents):
-                category = classify_product(proc_content)
-                save_to_weaviate(filename, content, proc_content, category)
+            processed_content = preprocess_text(content)
+            filename = uploaded_file.name
+            category = classify_product(processed_content)
+            save_to_weaviate(filename, content, processed_content, category)
 
-        st.success("🚀 모든 문서가 Weaviate에 성공적으로 저장되었습니다!")
+        st.success("🚀 PDF 파일이 Weaviate에 성공적으로 저장되었습니다!")
+
+    # 2. DB 시각화
+    st.header("2️⃣ DB 시각화")
+
+    if not check_weaviate_data():
+        st.error("Weaviate에 문서가 없습니다. 데이터를 다시 확인하거나 업로드하세요.")
+        return
+    else:
+        st.success("Weaviate에 문서가 성공적으로 확인되었습니다.")
+
+    category_option = st.selectbox("🔍 카테고리를 선택하세요", ["적금", "예금", "채권", "청년"])
+
+    if st.button("📊 시각화 보기"):
+        documents = get_documents_by_category(category_option)
+        if documents:
+            st.write(f"**{category_option}** 카테고리의 문서들:")
+            for doc in documents:
+                st.write(f"**파일명**: {doc['filename']}")
+                st.write(f"**키워드**: {', '.join(doc['keywords']) if doc['keywords'] else '없음'}")
+                st.write("---")
+        else:
+            st.warning(f"{category_option} 카테고리에 해당하는 문서가 없습니다.")
+
 
     # 2. DB 시각화
     st.header("2️⃣ DB 시각화")
