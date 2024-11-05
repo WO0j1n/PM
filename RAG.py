@@ -7,22 +7,19 @@ import weaviate
 import openai
 from dotenv import load_dotenv
 
-# .env 파일에서 환경 변수 로드
+# 1. .env 파일에서 환경 변수를 로드합니다.
 load_dotenv()
 
-# 환경 변수에서 Weaviate URL 및 API 키 가져오기
-WEAVIATE_URL = "https://fxlbgj0eq7m60mbelxgpng.c0.asia-southeast1.gcp.weaviate.cloud"  # REST Endpoint URL
-WEAVIATE_API_KEY = os.getenv("WEAVIATE_API_KEY")  # .env 파일에 저장된 API 키
-
-# Weaviate 클라이언트 생성 (API 키 인증 사용)
-client = weaviate.Client(
-    url=WEAVIATE_URL,
-    auth_client_secret=weaviate.AuthApiKey(api_key=WEAVIATE_API_KEY)
-)
+# 2. 환경 변수에서 OpenAI API 키를 가져옵니다.
+openai.api_key = os.getenv("OPENAI_API_KEY")
 
 # 로깅 설정
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Weaviate 클라이언트 설정
+WEAVIATE_URL = "http://localhost:8080"
+client = weaviate.Client(WEAVIATE_URL)
 
 # Weaviate에 데이터 스키마 생성
 def create_weaviate_schema():
@@ -40,11 +37,7 @@ def create_weaviate_schema():
                     "properties": [
                         {"name": "filename", "dataType": ["string"], "description": "The name of the PDF file"},
                         {"name": "content", "dataType": ["text"], "description": "The original content of the PDF"},
-                        {"name": "processed_content", "dataType": ["text"], "description": "The processed content of the PDF"},
-                        {"name": "keywords", "dataType": ["string[]"], "description": "Extracted keywords from the content"},
-                        {"name": "category", "dataType": ["string"], "description": "The classified category of the document"},
-                        {"name": "income_level", "dataType": ["int"], "description": "Income level from 1 to 10"},
-                        {"name": "recommendation", "dataType": ["string"], "description": "Financial product recommendation"}
+                        {"name": "processed_content", "dataType": ["text"], "description": "The processed content of the PDF"}
                     ]
                 }
             ]
@@ -219,25 +212,33 @@ def classify_product_with_mbti(income_level, wants_loan, age, mbti):
         return "미지정"
 
 # Weaviate에 데이터 저장
-def save_to_weaviate(filename, content, processed_content, category):
+def save_to_weaviate(filename, content, processed_content):
     try:
-        if not content.strip():
-            logger.warning(f"{filename} 파일의 내용이 비어 있습니다. 저장을 건너뜁니다.")
+        # 중복 체크: 동일한 파일명이 존재하는지 확인
+        response = client.query.get("Document", ["filename"]).with_where({
+            "path": ["filename"],
+            "operator": "Equal",
+            "valueText": filename
+        }).do()
+        documents = response.get("data", {}).get("Get", {}).get("Document", [])
+        if documents:
+            logger.info(f"{filename} 파일이 이미 저장되어 있습니다. 중복 저장을 방지합니다.")
             return
+
+        # 중복이 아닐 경우에만 저장
         data_object = {
             "filename": filename,
             "content": content,
-            "processed_content": processed_content,
-            "keywords": [],  # 키워드 추출 로직 추가 가능
-            "category": category,
-            "income_level": 0,
-            "recommendation": "미지정"
+            "processed_content": processed_content
         }
         client.data_object.create(data_object, "Document")
         logger.info(f"{filename} 파일이 성공적으로 Weaviate에 저장되었습니다.")
     except Exception as e:
         logger.error(f"Weaviate에 데이터를 저장하는 중 오류: {e}")
         st.error(f"{filename} 파일을 저장하는 중 오류가 발생했습니다. 오류: {e}")
+
+
+
 
 # Weaviate에서 카테고리별 문서 가져오기
 def get_documents_by_category(category):
@@ -377,117 +378,161 @@ def check_weaviate_data():
         logger.error(f"Weaviate 데이터 점검 중 오류: {e}")
         return False
 
-def perform_rag_query(query):
-    try:
-        # Weaviate에서 쿼리를 수행해 관련 문서 검색
-        response = client.query.get("Document", ["filename", "content", "category"]).with_near_text({
-            "concepts": [query],
-            "certainty": 0.7  # 확실성 값을 조정해 더 정확한 결과 반환
-        }).with_limit(5).do()
+import nltk
+from nltk.tokenize import sent_tokenize
+nltk.download('punkt')
 
+# Weaviate에서 모든 문서 가져오기
+# 문서 내용을 요약하는 함수
+def summarize_text(text, max_sentences=2):
+    try:
+        sentences = sent_tokenize(text)
+        if len(sentences) > max_sentences:
+            return " ".join(sentences[:max_sentences])
+        return text
+    except Exception as e:
+        logger.error(f"텍스트 요약 중 오류 발생: {e}")
+        return text
+
+
+# Weaviate에서 모든 문서 가져오기
+def fetch_all_documents():
+    try:
+        response = client.query.get("Document", ["filename", "content"]).do()
         documents = response.get("data", {}).get("Get", {}).get("Document", [])
-        if not documents:
-            logger.warning("관련 문서를 찾을 수 없습니다.")
         return documents
     except Exception as e:
-        logger.error(f"RAG 쿼리 중 오류 발생: {e}")
+        logger.error(f"Weaviate에서 데이터를 가져오는 중 오류: {e}")
         return []
 
+# LLM 기반 분석 및 질문 처리
+def handle_user_query(user_query):
+    try:
+        # Weaviate에서 문서 가져오기
+        documents = fetch_all_documents()
+        if not documents:
+            return "Weaviate에서 문서를 찾을 수 없습니다."
+
+        # 문서 수를 제한하고 내용을 요약
+        max_documents = 100000000 # 필요한 경우 조정
+        context = "\n\n".join([
+            summarize_text(doc['content'], max_sentences=1)  # 한 문장만 요약
+            for doc in documents[:max_documents]
+        ])
+
+        # LLM에 전달할 프롬프트 생성
+        prompt = f"""
+        다음은 일부 문서의 요약 내용입니다:
+        {context}
+
+        사용자의 질문: {user_query}
+        문서를 분석하고 질문에 적절히 답변해 주세요.
+        """
+
+        # LLM 호출
+        completion = openai.ChatCompletion.create(
+            model="gpt-4-turbo",
+            messages=[
+                {"role": "system", "content": "너는 문서를 기반으로 분석하고 질문에 답변하는 AI입니다."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=4096,  # 필요한 경우, max_tokens 값을 더 줄일 수 있습니다
+            temperature=0.7
+        )
+        answer = completion.choices[0].message['content'].strip()
+        return answer
+    except Exception as e:
+        logger.error(f"LLM 질문 처리 중 오류 발생: {e}")
+        return "LLM 질문을 처리하는 중 오류가 발생했습니다."
+
+
+
+def perform_grouping_and_mapping(user_query):
+    try:
+        # Weaviate에서 문서 가져오기
+        documents = fetch_all_documents()
+        if not documents:
+            return "Weaviate에서 문서를 찾을 수 없습니다."
+
+        # 문서 내용을 요약하여 LLM에 전달할 컨텍스트 생성
+        context = "\n\n".join([summarize_text(doc['content'], max_sentences=2) for doc in documents[:10]])
+
+        # LLM에 전달할 프롬프트 생성
+        prompt = f"""
+        다음은 문서 내용입니다:
+        {context}
+
+        사용자의 질문: {user_query}
+        문서를 적절히 분석하고 그룹화한 후, 금융 상품을 매핑해 주세요.
+        """
+
+        # LLM 호출
+        completion = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "너는 금융 문서 분석 전문가 AI입니다."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=1000,
+            temperature=0.7
+        )
+        answer = completion.choices[0].message['content'].strip()
+        return answer
+    except Exception as e:
+        logger.error(f"LLM 기반 그룹화 및 매핑 중 오류 발생: {e}")
+        return "LLM 기반 그룹화 및 매핑을 수행하는 중 오류가 발생했습니다."
+
 def main():
-    st.title("📄 PDF 내용 추출 및 LLM 기반 대화 시스템")
+    st.title("📄 PDF 내용 추출 및 Weaviate 저장 시스템")
 
-    # 1. PDF 파일 업로드 및 Weaviate에 저장
-    st.header("1️⃣ PDF 파일 업로드 및 DB 저장")
-    uploaded_file = st.file_uploader("📁 PDF 파일을 업로드하세요", type=["pdf"])
+    # 1. PDF 파일 추출 및 Weaviate에 저장
+    st.header("1️⃣ PDF 내용 추출 및 DB 저장")
+    pdf_folder = st.text_input("📁 PDF 파일이 저장된 폴더 경로를 입력하세요", "/Users/im-woojin/Desktop/신한은행/신한은행_데이터")
 
-    if uploaded_file is not None:
+    if st.button("🔍 PDF 내용 추출 및 DB 저장"):
+        if not os.path.exists(pdf_folder):
+            st.error("입력한 폴더 경로가 존재하지 않습니다. 다시 확인해주세요.")
+            return
+
         create_weaviate_schema()
 
         with st.spinner("📄 PDF 파일에서 텍스트를 추출 중입니다..."):
-            content = extract_text_from_pdf(uploaded_file)
-            if not content:
-                st.warning("PDF 파일에서 텍스트를 추출할 수 없습니다.")
+            filenames, documents = extract_text_from_pdfs(pdf_folder)
+            if not filenames:
+                st.warning("해당 폴더에 PDF 파일이 없거나 텍스트를 추출할 수 없습니다.")
                 return
+            processed_documents = [preprocess_text(doc) for doc in documents]
 
-            processed_content = preprocess_text(content)
-            filename = uploaded_file.name
-            category = classify_product(processed_content)
-            save_to_weaviate(filename, content, processed_content, category)
+            for filename, content, proc_content in zip(filenames, documents, processed_documents):
+                save_to_weaviate(filename, content, proc_content)  # category 인수 제거
 
-        st.success("🚀 PDF 파일이 Weaviate에 성공적으로 저장되었습니다!")
+        st.success("🚀 모든 문서가 Weaviate에 성공적으로 저장되었습니다!")
 
     # 2. DB 시각화
     st.header("2️⃣ DB 시각화")
-
-    if not check_weaviate_data():
-        st.error("Weaviate에 문서가 없습니다. 데이터를 다시 확인하거나 업로드하세요.")
-        return
-    else:
-        st.success("Weaviate에 문서가 성공적으로 확인되었습니다.")
-
-    category_option = st.selectbox("🔍 카테고리를 선택하세요", ["적금", "예금", "채권", "청년"])
-
-    if st.button("📊 시각화 보기"):
-        documents = get_documents_by_category(category_option)
+    if st.button("📊 모든 문서 보기"):
+        documents = fetch_all_documents()
         if documents:
-            st.write(f"**{category_option}** 카테고리의 문서들:")
+            st.write("DB에 저장된 문서들:")
             for doc in documents:
                 st.write(f"**파일명**: {doc['filename']}")
-                st.write(f"**키워드**: {', '.join(doc['keywords']) if doc['keywords'] else '없음'}")
+                st.write(f"**내용 요약**: {doc['content'][:200]}...")  # 내용의 일부만 출력
                 st.write("---")
         else:
-            st.warning(f"{category_option} 카테고리에 해당하는 문서가 없습니다.")
-
-    import re
-
-    import re
+            st.warning("DB에 저장된 문서가 없습니다.")
 
     # 3. LLM 기반 대화 시스템
-    st.header("3️⃣ RAG 기반 대화 시스템")
+    st.header("3️⃣ LLM 기반 대화 시스템")
     user_query = st.text_input("💬 질문을 입력하세요")
 
-    if st.button("💡 답변 생성"):
-        with st.spinner("GPT 모델에서 응답을 생성하고 있습니다..."):
-            try:
-                # 특수 문자를 모두 제거하고 유니코드 문자를 안전하게 처리
-                safe_query = user_query.encode('utf-8', 'ignore').decode('utf-8')
-                safe_query = re.sub(r'[^\w\s가-힣]', '', safe_query)  # 한글, 영문, 숫자, 공백만 허용
-
-                # Weaviate에서 관련 문서 검색
-                documents = perform_rag_query(safe_query)
-                if not documents:
-                    st.warning("관련 문서를 찾을 수 없습니다. GPT만의 답변을 생성합니다.")
-                    context = ""
-                else:
-                    # 관련 문서의 콘텐츠를 컨텍스트로 결합
-                    context = "\n\n".join([doc['content'] for doc in documents])
-                    st.write("🔍 **RAG에 사용된 문서:**")
-                    for doc in documents:
-                        st.write(f"- **파일명**: {doc['filename']}")
-                        st.write(f"  **카테고리**: {doc['category']}")
-
-                # GPT에 제공할 프롬프트 생성
-                prompt = f"문맥: {context}\n\n질문: {safe_query}\n\n답변:"
-
-                # GPT 응답 생성
-                completion = openai.ChatCompletion.create(
-                    model="gpt-3.5-turbo",  # 또는 "gpt-4"
-                    messages=[
-                        {"role": "system", "content": "너는 문서를 기반으로 대화하는 금융 전문가 AI입니다."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    max_tokens=300,
-                    temperature=0.7
-                )
-                answer = completion.choices[0].message['content'].strip()
-                st.subheader("🤖 GPT의 답변")
-                st.write(answer)
-            except Exception as e:
-                st.error(f"GPT 응답 생성 중 오류 발생: {e}")
+    if st.button("💡 질문 처리"):
+        with st.spinner("LLM에서 응답을 생성하고 있습니다..."):
+            answer = handle_user_query(user_query)
+            st.subheader("🤖 LLM의 응답")
+            st.write(answer)
 
     # 4. 사용자 정보 입력 및 MBTI 기반 금융 상품 추천
     st.header("4️⃣ 사용자 정보 입력 및 MBTI 기반 금융 상품 추천")
-
     # 스크롤 가능한 컨테이너 사용
     with st.container():
         with st.form("user_input_form"):
@@ -511,5 +556,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
