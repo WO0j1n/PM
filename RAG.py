@@ -212,13 +212,15 @@ def classify_product_with_mbti(income_level, wants_loan, age, mbti):
         return "미지정"
 
 # Weaviate에 데이터 저장
+# Weaviate에 데이터 저장 함수 수정
 def save_to_weaviate(filename, content, processed_content):
     try:
-        # 중복 체크: 동일한 파일명이 존재하는지 확인
-        response = client.query.get("Document", ["filename"]).with_where({
-            "path": ["filename"],
+        # 중복 체크 강화: 파일명을 기준으로 하지 않고 파일 해시를 생성하여 중복 확인
+        file_hash = hash(content)  # 파일 내용의 해시 생성
+        response = client.query.get("Document", ["filename", "content"]).with_where({
+            "path": ["content"],
             "operator": "Equal",
-            "valueText": filename
+            "valueText": content
         }).do()
         documents = response.get("data", {}).get("Get", {}).get("Document", [])
         if documents:
@@ -236,6 +238,7 @@ def save_to_weaviate(filename, content, processed_content):
     except Exception as e:
         logger.error(f"Weaviate에 데이터를 저장하는 중 오류: {e}")
         st.error(f"{filename} 파일을 저장하는 중 오류가 발생했습니다. 오류: {e}")
+
 
 
 
@@ -322,7 +325,7 @@ def classify_product_with_mbti(income_level, wants_loan, age, mbti):
 
 def fetch_all_documents():
     try:
-        response = client.query.get("Document", ["filename", "content", "processed_content", "category", "income_level"]).do()
+        response = client.query.get("Document", ["filename", "content"]).do()
         documents = response.get("data", {}).get("Get", {}).get("Document", [])
         return documents
     except Exception as e:
@@ -394,52 +397,45 @@ def summarize_text(text, max_sentences=2):
         logger.error(f"텍스트 요약 중 오류 발생: {e}")
         return text
 
-
-# Weaviate에서 모든 문서 가져오기
-def fetch_all_documents():
-    try:
-        response = client.query.get("Document", ["filename", "content"]).do()
-        documents = response.get("data", {}).get("Get", {}).get("Document", [])
-        return documents
-    except Exception as e:
-        logger.error(f"Weaviate에서 데이터를 가져오는 중 오류: {e}")
-        return []
-
 # LLM 기반 분석 및 질문 처리
 def handle_user_query(user_query):
+    # 세션 상태에서 'messages'가 존재하지 않는 경우 초기화
+    if 'messages' not in st.session_state:
+        st.session_state.messages = []  # messages 리스트 초기화
+
+    # Weaviate에서 모든 문서 제목 가져오기
+    documents = fetch_all_documents()
+    if not documents:
+        return "Weaviate에서 문서를 찾을 수 없습니다."
+
+    # 모든 문서의 파일명만 가져와 요약 정보로 사용
+    context = "\n".join([f"{i+1}. {doc['filename']}" for i, doc in enumerate(documents)])
+
+    # 사용자 메시지 추가
+    st.session_state.messages.append({"role": "user", "content": user_query})
+
+    # LLM에 전달할 프롬프트 생성
+    prompt = f"""
+    다음은 DB에 저장된 모든 금융 상품의 제목입니다:
+    {context}
+
+    사용자의 질문: {user_query}
+    문서를 분석하고 질문에 적절히 답변해 주세요.
+    """
+
+    # LLM 호출
     try:
-        # Weaviate에서 문서 가져오기
-        documents = fetch_all_documents()
-        if not documents:
-            return "Weaviate에서 문서를 찾을 수 없습니다."
-
-        # 문서 수를 제한하고 내용을 요약
-        max_documents = 100000000 # 필요한 경우 조정
-        context = "\n\n".join([
-            summarize_text(doc['content'], max_sentences=1)  # 한 문장만 요약
-            for doc in documents[:max_documents]
-        ])
-
-        # LLM에 전달할 프롬프트 생성
-        prompt = f"""
-        다음은 일부 문서의 요약 내용입니다:
-        {context}
-
-        사용자의 질문: {user_query}
-        문서를 분석하고 질문에 적절히 답변해 주세요.
-        """
-
-        # LLM 호출
         completion = openai.ChatCompletion.create(
             model="gpt-4-turbo",
-            messages=[
-                {"role": "system", "content": "너는 문서를 기반으로 분석하고 질문에 답변하는 AI입니다."},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=4096,  # 필요한 경우, max_tokens 값을 더 줄일 수 있습니다
+            messages=st.session_state.messages + [{"role": "user", "content": prompt}],  # 프롬프트를 추가하여 요청
+            max_tokens=4096,  # gpt-4-turbo의 최대 토큰 수
             temperature=0.7
         )
         answer = completion.choices[0].message['content'].strip()
+
+        # Assistant 응답 저장
+        st.session_state.messages.append({"role": "assistant", "content": answer})
+
         return answer
     except Exception as e:
         logger.error(f"LLM 질문 처리 중 오류 발생: {e}")
@@ -468,12 +464,12 @@ def perform_grouping_and_mapping(user_query):
 
         # LLM 호출
         completion = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
+            model="gpt-4-turbo",
             messages=[
                 {"role": "system", "content": "너는 금융 문서 분석 전문가 AI입니다."},
                 {"role": "user", "content": prompt}
             ],
-            max_tokens=1000,
+            max_tokens=4096,
             temperature=0.7
         )
         answer = completion.choices[0].message['content'].strip()
@@ -483,6 +479,10 @@ def perform_grouping_and_mapping(user_query):
         return "LLM 기반 그룹화 및 매핑을 수행하는 중 오류가 발생했습니다."
 
 def main():
+    # 세션 상태에서 'messages'가 존재하지 않는 경우 초기화
+    if 'messages' not in st.session_state:
+        st.session_state.messages = []  # messages 리스트 초기화
+
     st.title("📄 PDF 내용 추출 및 Weaviate 저장 시스템")
 
     # 1. PDF 파일 추출 및 Weaviate에 저장
@@ -531,6 +531,14 @@ def main():
             st.subheader("🤖 LLM의 응답")
             st.write(answer)
 
+        # 대화 기록 출력
+    st.write("### 📝 대화 기록")
+    for message in st.session_state.messages:
+        if message["role"] == "user":
+            st.write(f"**사용자:** {message['content']}")
+        elif message["role"] == "assistant":
+            st.write(f"**AI:** {message['content']}")
+
     # 4. 사용자 정보 입력 및 MBTI 기반 금융 상품 추천
     st.header("4️⃣ 사용자 정보 입력 및 MBTI 기반 금융 상품 추천")
     # 스크롤 가능한 컨테이너 사용
@@ -556,3 +564,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
