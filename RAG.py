@@ -11,16 +11,18 @@ from dotenv import load_dotenv
 from weaviate import Client
 import nltk
 from nltk.tokenize import sent_tokenize
+from weaviate.auth import AuthApiKey
 
-# Load environment variables
 load_dotenv()
 openai.api_key = os.getenv("OPENAI_API_KEY")
 WEAVIATE_URL = os.getenv("WEAVIATE_URL")
 
-# Weaviate client setup
+
+auth_config = AuthApiKey(api_key="otqzBStAkpExjmUeVALBsFUFxa2mVYLB5di8")
 client = Client(
-    url=WEAVIATE_URL,
-    timeout_config=(5, 15)  # (connect timeout, read timeout)
+    url="https://qdctu8artzisv6g94ewjg.c0.asia-southeast1.gcp.weaviate.cloud",
+    auth_client_secret=auth_config,
+    timeout_config=(5, 15)
 )
 
 # Logging setup
