@@ -1,35 +1,41 @@
 import os
 import re
-import time
-import logging
-import requests
 from PyPDF2 import PdfReader
 import streamlit as st
+import logging
 import weaviate
 import openai
 from dotenv import load_dotenv
+import json
 from weaviate import Client
 import nltk
 from nltk.tokenize import sent_tokenize
-from weaviate.auth import AuthApiKey
+import time
+import requests
+import platform
 
+# 환경 변수 로드
 load_dotenv()
 openai.api_key = os.getenv("OPENAI_API_KEY")
 WEAVIATE_URL = os.getenv("WEAVIATE_URL")
 
+# UnicodeEncodeError 방지를 위한 custom session 생성
+session = requests.Session()
+session.headers['User-Agent'] = 'OpenAI-Python'
+openai.requestssession = session
+openai.disable_telemetry = True
 
-auth_config = AuthApiKey(api_key="otqzBStAkpExjmUeVALBsFUFxa2mVYLB5di8")
+# Weaviate 클라이언트 설정
 client = Client(
-    url="https://qdctu8artzisv6g94ewjg.c0.asia-southeast1.gcp.weaviate.cloud",
-    auth_client_secret=auth_config,
-    timeout_config=(5, 15)
+    url=WEAVIATE_URL,
+    timeout_config=(5, 15)  # (connect timeout, read timeout)
 )
 
-# Logging setup
-logging.basicConfig(level=logging.INFO)
+# 로깅 설정
+logging.basicConfig(level=logging.INFO, encoding='utf-8')
 logger = logging.getLogger(__name__)
 
-# NLTK data download
+# NLTK 데이터 다운로드
 nltk.download('punkt')
 
 # Weaviate connection check function
@@ -38,11 +44,13 @@ def check_weaviate_connection(retries=3):
     for attempt in range(retries):
         try:
             if client.is_ready():
-                logger.info("Connected to Weaviate server.")
+                logger.info("Successfully connected to Weaviate server.")
                 return True
+            else:
+                logger.error("Cannot connect to Weaviate server. Attempt %d", attempt + 1)
         except Exception as e:
-            logger.error(f"Connection error on attempt {attempt + 1}: {e}")
-            st.error(f"Connection attempt {attempt + 1} failed.")
+            logger.error(f"Error checking Weaviate connection: {e}")
+            st.error(f"Attempt {attempt + 1} to connect to Weaviate failed. Error: {e}")
     st.error("All connection attempts to Weaviate failed.")
     return False
 
@@ -154,11 +162,10 @@ def extract_text_from_pdfs(uploaded_files):
                 text = ''.join(page.extract_text() for page in reader.pages if page.extract_text())
                 texts.append(text)
                 filenames.append(uploaded_file.name)
-                logger.info(f"Successfully extracted text: {uploaded_file.name}")
+                logger.info(f"텍스트 추출 성공: {uploaded_file.name}")
             except Exception as e:
-                logger.error(f"Error reading {uploaded_file.name}: {e}")
+                logger.error(f"{uploaded_file.name} 읽기 오류: {e}")
     return filenames, texts
-
 
 # 불필요한 특수 문자 제거
 def preprocess_text(text):
@@ -167,7 +174,7 @@ def preprocess_text(text):
         text = re.sub(r'\s+', ' ', text)
         return text.strip()
     except Exception as e:
-        logger.error(f"Error preprocessing text: {e}")
+        logger.error(f"텍스트 전처리 중 오류 발생: {e}")
         return ""
 
 
@@ -180,8 +187,15 @@ def classify_with_llm(text):
         response = openai.ChatCompletion.create(
             model="gpt-4",
             messages=[
-                {"role": "system",
-                 "content": "주어진 금융 상품 설명에서 적절한 카테고리와 MBTI 유형을 추출해 주세요. 카테고리는 적금, 예금, 채권, 청년 중 하나일 수 있으며, MBTI는 ISTJ, ISFJ, INFJ, INTJ, ISTP, ISFP, INFP, INTP, ESTP, ESFP, ENFP, ENTP, ESTJ, ESFJ, ENFJ, ENTJ 중 하나입니다."},
+                {
+                    "role": "system",
+                    "content": (
+                        "주어진 금융 상품 설명에서 적절한 카테고리와 MBTI 유형을 추출해 주세요. "
+                        "카테고리는 적금, 예금, 채권, 청년 중 하나일 수 있으며, "
+                        "MBTI는 ISTJ, ISFJ, INFJ, INTJ, ISTP, ISFP, INFP, INTP, "
+                        "ESTP, ESFP, ENFP, ENTP, ESTJ, ESFJ, ENFJ, ENTJ 중 하나입니다."
+                    )
+                },
                 {"role": "user", "content": text}
             ],
             max_tokens=50,
@@ -192,16 +206,19 @@ def classify_with_llm(text):
         # LLM 응답에서 카테고리와 MBTI 추출
         category_match = re.search(r"카테고리:\s*(\S+)", llm_response)
         mbti_match = re.search(
-            r"MBTI:\s*(ISTJ|ISFJ|INFJ|INTJ|ISTP|ISFP|INFP|INTP|ESTP|ESFP|ENFP|ENTP|ESTJ|ESFJ|ENFJ|ENTJ)", llm_response,
-            re.IGNORECASE)
+            r"MBTI:\s*(ISTJ|ISFJ|INFJ|INTJ|ISTP|ISFP|INFP|INTP|ESTP|ESFP|ENFP|ENTP|ESTJ|ESFJ|ENFJ|ENTJ)",
+            llm_response,
+            re.IGNORECASE
+        )
 
         category = category_match.group(1) if category_match else "미지정"
         mbti = mbti_match.group(1).upper() if mbti_match else "미지정"
 
         return category, mbti
     except Exception as e:
-        logger.error(f"Error classifying with LLM: {e}")
+        logger.error(f"LLM 분류 중 오류 발생: {e}")
         return "미지정", "미지정"
+
 
 
 # Text classification function
@@ -253,6 +270,7 @@ def classify_product(text):
 # Income level calculation function
 def calculate_income_level(asset_size, monthly_salary):
     try:
+        # 자산 수준 계산
         if asset_size <= 5000000:
             asset_level = 1
         elif asset_size <= 10000000:
@@ -274,6 +292,7 @@ def calculate_income_level(asset_size, monthly_salary):
         else:
             asset_level = 10
 
+        # 월급 수준 계산
         if monthly_salary <= 1500000:
             salary_level = 1
         elif monthly_salary <= 2000000:
@@ -298,31 +317,29 @@ def calculate_income_level(asset_size, monthly_salary):
         average_level = (asset_level + salary_level) / 2
         return round(average_level)
     except Exception as e:
-        logger.error(f"Error calculating income level: {e}")
+        logger.error(f"수익 분위 계산 중 오류 발생: {e}")
         return 0
 
 # MBTI-based finance product recommendation function
 def classify_product_with_mbti(income_level, age, mbti):
     try:
-        # I vs E: Stability vs High Return
+        # 성향 파악
         if 'I' in mbti.upper():
             risk_preference = "안정성"
         else:
             risk_preference = "고수익"
 
-        # J vs P: Long-term vs Short-term
         if 'J' in mbti.upper():
             term_preference = "장기성"
         else:
             term_preference = "단기성"
 
-        # N vs S: Future return volatility vs Current fixed interest rate
         if 'N' in mbti.upper():
             return_type_preference = "미래 수익 변동성"
         else:
             return_type_preference = "현재 고정 이자율"
 
-        # Product recommendation logic based on income level
+        # 소득 수준에 따른 기본 추천
         if income_level <= 3:
             base_recommendation = "적금"
         elif income_level <= 6:
@@ -330,10 +347,9 @@ def classify_product_with_mbti(income_level, age, mbti):
         else:
             base_recommendation = "채권"
 
-        # Provide additional recommendation based on MBTI preferences
+        # 추가 추천 메시지 구성
         recommendation_message = f"{base_recommendation} (소득 분위 기준)"
 
-        # Additional recommendation based on risk preference and term preference
         if base_recommendation == "적금":
             if risk_preference == "고수익" or return_type_preference == "미래 수익 변동성":
                 recommendation_message += " - 하지만 고수익을 원하신다면 예금을 고려해보세요."
@@ -348,7 +364,7 @@ def classify_product_with_mbti(income_level, age, mbti):
 
         return base_recommendation, recommendation_message
     except Exception as e:
-        logger.error(f"Error recommending product based on MBTI: {e}")
+        logger.error(f"MBTI 기반 추천 중 오류 발생: {e}")
         return "미지정", "추천 과정에서 오류가 발생했습니다."
 
 
@@ -580,6 +596,9 @@ def handle_llm_response(response):
         return "응답 처리 중 오류가 발생했습니다."
 
 
+# LLM-based conversation system with Weaviate operations
+import requests
+
 
 # 특정 MBTI 유형과 카테고리로 필터링된 금융 상품 가져오기
 # 특정 MBTI 유형과 카테고리로 필터링된 금융 상품 가져오기
@@ -690,6 +709,20 @@ def handle_user_query(user_query):
     else:
         st.session_state.messages.append({"role": "assistant", "content": llm_answer})
 
+import os
+import re
+from PyPDF2 import PdfReader
+import streamlit as st
+import logging
+import weaviate
+import openai
+from dotenv import load_dotenv
+import json
+from weaviate import Client
+import nltk
+from nltk.tokenize import sent_tokenize
+import time
+
 # Load environment variables
 load_dotenv()
 openai.api_key = os.getenv("OPENAI_API_KEY")
@@ -713,14 +746,14 @@ def check_weaviate_connection(retries=3):
     for attempt in range(retries):
         try:
             if client.is_ready():
-                logger.info("Successfully connected to Weaviate server.")
+                logger.info("Weaviate 서버에 성공적으로 연결되었습니다.")
                 return True
             else:
-                logger.error("Cannot connect to Weaviate server. Attempt %d", attempt + 1)
+                logger.error("Weaviate 서버에 연결할 수 없습니다. 시도 횟수: %d", attempt + 1)
         except Exception as e:
-            logger.error(f"Error checking Weaviate connection: {e}")
-            st.error(f"Attempt {attempt + 1} to connect to Weaviate failed. Error: {e}")
-    st.error("All connection attempts to Weaviate failed.")
+            logger.error(f"Weaviate 연결 확인 중 오류 발생: {e}")
+            st.error(f"Weaviate 연결 시도 {attempt + 1} 실패. 오류: {e}")
+    st.error("Weaviate에 대한 모든 연결 시도가 실패했습니다.")
     return False
 
 # Weaviate schema creation function
@@ -774,22 +807,23 @@ def main():
         st.error("Weaviate 서버에 연결할 수 없습니다. 서버 상태를 확인하세요.")
         return
 
-    # Weaviate 스키마 생성
-    create_weaviate_schema()
+    # Weaviate 스키마 생성 (생략)
 
-    # 사이드바와 메인 페이지 UI 생성
-    st.sidebar.markdown("<h2 style='font-size: 1.5em;'>🦐 사용자 정보 입력 및 MBTI 기반 금융 상품 추천</h2>", unsafe_allow_html=True)
+    # 사이드바 및 메인 페이지 UI
+    st.sidebar.markdown(
+        "<h2 style='font-size: 1.5em;'>🦐 사용자 정보 입력 및 MBTI 기반 금융 상품 추천</h2>",
+        unsafe_allow_html=True
+    )
     menu = ["Home", "Admin Page"]
 
-    # 고유한 메뉴 선택 박스 키 설정
     choice = st.sidebar.selectbox(
         "📋 메뉴 선택",
         menu,
-        index=menu.index(st.session_state.get("page", "Home")),
+        index=menu.index(st.session_state.get("page", "Home")) if 'page' in st.session_state else 0,
         key="unique_menu_selectbox_key"
     )
 
-    # 사용자 정보 입력 및 MBTI 기반 금융 상품 추천
+    # 사용자 입력 폼
     with st.sidebar.form("user_input_form"):
         asset_size = st.number_input("💸 자산 규모 (원)", min_value=0, format="%d", value=0)
         monthly_salary = st.number_input("💵 월급 (원)", min_value=0, format="%d", value=0)
@@ -802,7 +836,7 @@ def main():
         income_level = calculate_income_level(asset_size, monthly_salary)
         base_recommendation, recommendation_message = classify_product_with_mbti(income_level, age, mbti)
 
-        # MBTI 성향 설명 추가
+        # MBTI 성향 설명
         mbti_personality = {
             "I": "안정적인 투자 성향",
             "E": "고수익 투자 성향",
@@ -812,7 +846,8 @@ def main():
             "P": "단기적인 투자 성향"
         }
         mbti_explanation = f"{mbti.upper()}: " + ", ".join(
-            [mbti_personality.get(char, "") for char in mbti.upper() if char in mbti_personality])
+            [mbti_personality.get(char, "") for char in mbti.upper() if char in mbti_personality]
+        )
 
         # 추천 결과 표시
         st.sidebar.markdown(
@@ -851,12 +886,10 @@ def main():
         # 사용자 입력 받기
         user_input = st.chat_input("💬 질문을 입력하세요")
         if user_input:
-            # 사용자 메시지 표시
             with st.chat_message("user"):
                 st.markdown(user_input)
             with st.spinner("LLM에서 응답을 생성하고 있습니다..."):
                 handle_user_query(user_input)
-            # 어시스턴트 응답 표시
             assistant_message = st.session_state.messages[-1]
             if assistant_message["role"] == "assistant":
                 with st.chat_message("assistant"):
@@ -901,3 +934,4 @@ if __name__ == "__main__":
     if 'messages' not in st.session_state:
         st.session_state.messages = []
     main()
+
